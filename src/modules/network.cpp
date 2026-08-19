@@ -349,7 +349,7 @@ const std::string waybar::modules::Network::getNetworkState() const {
 #endif
     return "disconnected";
   }
-  if (ipaddr_.empty() || !carrier_) return "connecting";
+  if (!carrier_) return "connecting";
   if (ipaddr_.empty() && ipaddr6_.empty()) return "linked";
   if (essid_.empty()) return "ethernet";
   return "wifi";
