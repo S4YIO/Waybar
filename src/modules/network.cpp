@@ -332,7 +332,7 @@ bool waybar::modules::Network::isWireless() const {
 }
 
 const std::string waybar::modules::Network::getNetworkState() const {
-  if (ifid_ == -1) {
+  if (ifid_ == -1 || !carrier_) {
 #ifdef WANT_RFKILL
     bool display_rfkill = true;
     if (config_["rfkill"].isBool()) {
@@ -347,9 +347,11 @@ const std::string waybar::modules::Network::getNetworkState() const {
       return "disabled";
     }
 #endif
-    return "disconnected";
+    // No interface; nothing to negotiate
+    if (ifid_ == -1) return "disconnected";
+    // interface up; carrier 0
+    return "connecting";
   }
-  if (!carrier_) return "connecting";
   if (ipaddr_.empty() && ipaddr6_.empty()) return "linked";
   if (essid_.empty()) return "ethernet";
   return "wifi";
