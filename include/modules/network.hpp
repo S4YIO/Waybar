@@ -24,12 +24,12 @@ enum ip_addr_pref : uint8_t { IPV4, IPV6, IPV4_6 };
 namespace waybar::modules {
 
 class Network : public ALabel {
- public:
+public:
   Network(const std::string&, const Json::Value&);
   virtual ~Network();
   auto update() -> void override;
 
- private:
+private:
   static const uint8_t MAX_RETRY{5};
   static const uint8_t EPOLL_MAX{200};
 
@@ -54,7 +54,9 @@ class Network : public ALabel {
   bool isWireless() const;
   const std::string getNetworkState() const;
   void clearIface();
+  void clearIfaceAddressing();
   std::optional<std::pair<unsigned long long, unsigned long long>> readBandwidthUsage();
+  bool readIfUp() const;
   uint32_t readLinkSpeed() const;
 
   int ifid_{-1};
@@ -84,6 +86,7 @@ class Network : public ALabel {
   std::string essid_;
   std::string bssid_;
   bool carrier_{false};
+  bool had_carrier_{false};
   std::string ifname_;
   std::string ipaddr_;
   std::string ipaddr6_;
@@ -95,7 +98,7 @@ class Network : public ALabel {
   int32_t signal_strength_dbm_;
   uint8_t signal_strength_;
   std::string signal_strength_app_;
-  uint32_t route_priority;
+  uint32_t route_priority{UINT32_MAX};
   uint32_t link_speed_{0};
 
   util::SleeperThread thread_;

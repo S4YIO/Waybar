@@ -84,6 +84,25 @@ waybar::modules::Network::readBandwidthUsage() {
   return {{receivedBytes, transmittedBytes}};
 }
 
+// Cached member updated from netlink events went stale; read directly from sysfs
+bool waybar::modules::Network::readIfUp() const {
+  if (ifname_.empty()) return false;
+
+  auto path = fmt::format("/sys/class/net/{}/flags", ifname_);
+  std::ifstream sysfs_flags(path);
+  if (!sysfs_flags) return false;
+
+  std::string hex;
+  sysfs_flags >> hex;
+  if (sysfs_flags.fail()) return false;
+
+  try {
+    return (std::stoul(hex, nullptr, 16) & IFF_UP) != 0;
+  } catch (const std::exception&) {
+    return false;
+  }
+}
+
 uint32_t waybar::modules::Network::readLinkSpeed() const {
   auto path = fmt::format("/sys/class/net/{}/speed", ifname_);
   std::ifstream sysfs_speed(path);
@@ -332,7 +351,8 @@ bool waybar::modules::Network::isWireless() const {
 }
 
 const std::string waybar::modules::Network::getNetworkState() const {
-  if (ifid_ == -1 || !carrier_) {
+  const bool up = readIfUp();
+  if (ifid_ == -1 || !up || !carrier_) {
 #ifdef WANT_RFKILL
     bool display_rfkill = true;
     if (config_["rfkill"].isBool()) {
@@ -348,9 +368,9 @@ const std::string waybar::modules::Network::getNetworkState() const {
     }
 #endif
     // No interface; nothing to negotiate
-    if (ifid_ == -1) return "disconnected";
+    if (ifid_ == -1 || !up) return "disconnected";
     // interface up; carrier 0
-    return "connecting";
+    return had_carrier_ ? "disconnected" : "connecting";
   }
   if (ipaddr_.empty() && ipaddr6_.empty()) return "linked";
   if (essid_.empty()) return "ethernet";
@@ -402,6 +422,7 @@ auto waybar::modules::Network::update() -> void {
 
   if (!alt_) {
     auto state = getNetworkState();
+    spdlog::debug("netowrk: STATE={} ifid={} ifup={} carrier={} ip='{}'", state, ifid_, readIfUp(), carrier_, ipaddr_);
     if (!state_.empty() && label_.get_style_context()->has_class(state_)) {
       label_.get_style_context()->remove_class(state_);
     }
@@ -564,9 +585,18 @@ bool waybar::modules::Network::matchInterface(const std::string& ifname,
   return false;
 }
 
+// loosing default route invalidates addressing but not what interface is being watched or what
+// its link is doing hence the split of clearIface()
 void waybar::modules::Network::clearIface() {
+  clearIfaceAddressing();
   ifid_ = -1;
   ifname_.clear();
+  carrier_ = false;
+  had_carrier_ = false;
+  is_p2p_ = false;
+}
+
+void waybar::modules::Network::clearIfaceAddressing() {
   essid_.clear();
   bssid_.clear();
   ipaddr_.clear();
@@ -574,8 +604,6 @@ void waybar::modules::Network::clearIface() {
   gwaddr_.clear();
   netmask_.clear();
   netmask6_.clear();
-  carrier_ = false;
-  is_p2p_ = false;
   cidr_ = 0;
   cidr6_ = 0;
   signal_strength_dbm_ = 0;
@@ -585,6 +613,7 @@ void waybar::modules::Network::clearIface() {
   frequency_ = 0.0;
   rx_bitrate_ = 0;
   tx_bitrate_ = 0;
+  route_priority = UINT32_MAX;
 }
 
 int waybar::modules::Network::handleEvents(struct nl_msg* msg, void* data) {
@@ -649,10 +678,30 @@ int waybar::modules::Network::handleEvents(struct nl_msg* msg, void* data) {
       }
 
       if (!is_del_event && ifi->ifi_index == net->ifid_) {
+        spdlog::debug("network: TRACKED if{} flags_up={} carrier={}", ifi->ifi_index,
+          (ifi->ifi_flags & IFF_UP) != 0,
+          carrier.has_value() ? (*carrier ? 1 : 0) : -1);
+
+        if ((ifi->ifi_flags & IFF_UP) == 0) {
+          net->had_carrier_ = false;
+        } else if (carrier.value_or(false)) {
+          net->had_carrier_ = true;
+        }
+
         // Update interface information
         if (net->ifname_.empty() && !ifname.empty()) {
           net->ifname_ = ifname;
         }
+
+        // administrative state
+        const bool up = (ifi->ifi_flags & IFF_UP);
+        if (!up) {
+          // With some network drivers (e.g. mt7921e), the interface may
+          // report having a carrier even though interface is down.
+          carrier = false;
+        }
+        net->dp.emit();
+
         if (carrier.has_value()) {
           if (net->carrier_ != *carrier) {
             if (*carrier) {
@@ -667,8 +716,14 @@ int waybar::modules::Network::handleEvents(struct nl_msg* msg, void* data) {
               net->signal_strength_app_.clear();
               net->frequency_ = 0.0;
             }
+            net->dp.emit();
           }
           net->carrier_ = carrier.value();
+          if ((ifi->ifi_flags & IFF_UP) == 0) {
+            net->had_carrier_ = false;
+          } else if (carrier.value_or(false)) {
+            net->had_carrier_ = true;
+          }
         }
       } else if (!is_del_event && net->ifid_ == -1) {
         // Checking if it's an interface we care about.
@@ -686,7 +741,7 @@ int waybar::modules::Network::handleEvents(struct nl_msg* msg, void* data) {
           if ((ifi->ifi_flags & IFF_POINTOPOINT) != 0) {
             net->is_p2p_ = true;
           }
-          if ((ifi->ifi_flags & IFF_UP) == 0) {
+          if ((ifi->ifi_flags & IFF_UP) != 0) {
             // With some network drivers (e.g. mt7921e), the interface may
             // report having a carrier even though interface is down.
             carrier = false;
@@ -883,9 +938,15 @@ int waybar::modules::Network::handleEvents(struct nl_msg* msg, void* data) {
         checking route id
         **/
         if (!is_del_event && ((net->ifid_ == -1) || (priority < net->route_priority))) {
-          // Clear if's state for the case were there is a higher priority
-          // route on a different interface.
-          net->clearIface();
+          // Same interface already tracked; route reappearing says nothing about link state,
+          // reset addressing only
+          if (temp_idx == net->ifid_) {
+            net->clearIfaceAddressing();
+          } else {
+            // Clear if's state for the case were there is a higher priority
+            // route on a different interface.
+            net->clearIface();
+          }
           net->ifid_ = temp_idx;
           net->route_priority = priority;
           net->gwaddr_ = gateway_addr;
@@ -916,7 +977,7 @@ int waybar::modules::Network::handleEvents(struct nl_msg* msg, void* data) {
           spdlog::debug("network: default route deleted {}/if{} metric {}", net->ifname_, temp_idx,
                         priority);
 
-          net->clearIface();
+          net->clearIfaceAddressing();
           net->dp.emit();
           /* Ask for a dump of all routes in case another one is already
            * setup. If there's none, there'll be an event with new one

@@ -58,7 +58,8 @@ Addressed by *network*
 
 *format-connecting*: ++
     typeof: string ++
-    This format is used when the interface is up but the carrier is 0
+    This format is used when the interface administratively is up but the carrier is 0
+    NOTE: requires "interface" to be set in the config
 
 *format-alt*: ++
 	typeof: string ++
