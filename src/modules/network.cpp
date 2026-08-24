@@ -25,10 +25,10 @@ using namespace waybar::util;
 constexpr const char* DEFAULT_FORMAT = "{ifname}";
 }  // namespace
 
-constexpr const char* NETDEV_FILE =
-    "/proc/net/dev";  // std::ifstream does not take std::string_view as param
-std::optional<std::pair<unsigned long long, unsigned long long>>
-waybar::modules::Network::readBandwidthUsage() {
+// std::ifstream does not take std::string_view as param
+constexpr const char* NETDEV_FILE = "/proc/net/dev";
+std::optional<std::pair<unsigned long long, unsigned long long>> waybar::modules::Network::readBandwidthUsage() {
+  
   std::ifstream netdev(NETDEV_FILE);
   if (!netdev) {
     spdlog::warn("Failed to open netdev file {}", NETDEV_FILE);
@@ -101,6 +101,21 @@ bool waybar::modules::Network::readIfUp() const {
   } catch (const std::exception&) {
     return false;
   }
+}
+
+// read directly from sysfs
+bool waybar::modules::Network::readCarrier() const {
+  if (ifname_.empty()) return false;
+
+  auto path = fmt::format("/sys/class/net/{}/carrier", ifname_);
+  std::ifstream sysfs_carrier(path);
+  if (!sysfs_carrier) return false;
+
+  int value = 0;
+  sysfs_carrier >> value;
+  if (sysfs_carrier.fail()) return false;
+
+  return value != 0;
 }
 
 uint32_t waybar::modules::Network::readLinkSpeed() const {
@@ -352,7 +367,8 @@ bool waybar::modules::Network::isWireless() const {
 
 const std::string waybar::modules::Network::getNetworkState() const {
   const bool up = readIfUp();
-  if (ifid_ == -1 || !up || !carrier_) {
+  const bool carrier = up && readCarrier();
+  if (ifid_ == -1 || !up || !carrier) {
 #ifdef WANT_RFKILL
     bool display_rfkill = true;
     if (config_["rfkill"].isBool()) {
@@ -682,9 +698,10 @@ int waybar::modules::Network::handleEvents(struct nl_msg* msg, void* data) {
           (ifi->ifi_flags & IFF_UP) != 0,
           carrier.has_value() ? (*carrier ? 1 : 0) : -1);
 
+        net->carrier_ = carrier.value();
         if ((ifi->ifi_flags & IFF_UP) == 0) {
           net->had_carrier_ = false;
-        } else if (carrier.value_or(false)) {
+        } else if (net->carrier_) {
           net->had_carrier_ = true;
         }
 
@@ -721,7 +738,7 @@ int waybar::modules::Network::handleEvents(struct nl_msg* msg, void* data) {
           net->carrier_ = carrier.value();
           if ((ifi->ifi_flags & IFF_UP) == 0) {
             net->had_carrier_ = false;
-          } else if (carrier.value_or(false)) {
+          } else if (net->carrier_) {
             net->had_carrier_ = true;
           }
         }

@@ -57,6 +57,7 @@ private:
   void clearIfaceAddressing();
   std::optional<std::pair<unsigned long long, unsigned long long>> readBandwidthUsage();
   bool readIfUp() const;
+  bool readCarrier() const;
   uint32_t readLinkSpeed() const;
 
   int ifid_{-1};
